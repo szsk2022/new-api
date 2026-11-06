@@ -62,12 +62,28 @@ type CustomOAuthProvider struct {
 	AccessPolicy        string `json:"access_policy" gorm:"type:text"`                 // JSON policy for access control based on user info
 	AccessDeniedMessage string `json:"access_denied_message" gorm:"type:varchar(512)"` // Custom error message template when access is denied
 
+	// ProviderKind distinguishes generic OAuth2 rows ("") from managed rows of
+	// other protocols; "zibll" rows are owned by the Zibll agent login settings.
+	ProviderKind string `json:"provider_kind" gorm:"type:varchar(32);default:''"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func (CustomOAuthProvider) TableName() string {
 	return "custom_oauth_providers"
+}
+
+// IsZibllProvider reports whether the row is a Zibll agent login provider.
+func (p *CustomOAuthProvider) IsZibllProvider() bool {
+	return p.ProviderKind == "zibll"
+}
+
+// GetAllZibllProviders returns every Zibll agent provider row, enabled or not.
+func GetAllZibllProviders() ([]*CustomOAuthProvider, error) {
+	var providers []*CustomOAuthProvider
+	err := DB.Where("provider_kind = ?", "zibll").Order("id asc").Find(&providers).Error
+	return providers, err
 }
 
 // GetAllCustomOAuthProviders returns all custom OAuth providers
@@ -161,18 +177,25 @@ func validateCustomOAuthProvider(provider *CustomOAuthProvider) error {
 		}
 	}
 	provider.Slug = slug
+	if slug == "telegram" {
+		return errors.New("the telegram slug is reserved for built-in Telegram OAuth; rename this custom provider")
+	}
 
 	if provider.ClientId == "" {
 		return errors.New("client ID is required")
 	}
-	if provider.AuthorizationEndpoint == "" {
-		return errors.New("authorization endpoint is required")
-	}
-	if provider.TokenEndpoint == "" {
-		return errors.New("token endpoint is required")
-	}
-	if provider.UserInfoEndpoint == "" {
-		return errors.New("user info endpoint is required")
+	// Zibll agent rows carry no OAuth2 endpoints; the protocol lives in the
+	// oauth package and only needs the login type stored in ClientId.
+	if provider.ProviderKind != "zibll" {
+		if provider.AuthorizationEndpoint == "" {
+			return errors.New("authorization endpoint is required")
+		}
+		if provider.TokenEndpoint == "" {
+			return errors.New("token endpoint is required")
+		}
+		if provider.UserInfoEndpoint == "" {
+			return errors.New("user info endpoint is required")
+		}
 	}
 
 	// Set defaults for field mappings if empty

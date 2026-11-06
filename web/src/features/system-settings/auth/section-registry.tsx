@@ -21,6 +21,7 @@ import { createSectionRegistry } from '../utils/section-registry'
 import { BasicAuthSection } from './basic-auth-section'
 import { BotProtectionSection } from './bot-protection-section'
 import { CustomOAuthSection } from './custom-oauth/custom-oauth-section'
+import { ZibllAgentSection } from './zibll-agent/zibll-agent-section'
 import { OAuthSection } from './oauth-section'
 import { PasskeySection } from './passkey-section'
 
@@ -56,6 +57,7 @@ const AUTH_SECTIONS = [
           'discord.client_id': settings['discord.client_id'],
           'discord.client_secret': settings['discord.client_secret'],
           'oidc.enabled': settings['oidc.enabled'],
+          'oidc.display_name': settings['oidc.display_name'],
           'oidc.client_id': settings['oidc.client_id'],
           'oidc.client_secret': settings['oidc.client_secret'],
           'oidc.well_known': settings['oidc.well_known'],
@@ -64,8 +66,8 @@ const AUTH_SECTIONS = [
           'oidc.token_endpoint': settings['oidc.token_endpoint'],
           'oidc.user_info_endpoint': settings['oidc.user_info_endpoint'],
           TelegramOAuthEnabled: settings.TelegramOAuthEnabled,
-          TelegramBotToken: settings.TelegramBotToken,
-          TelegramBotName: settings.TelegramBotName,
+          'telegram.client_id': settings['telegram.client_id'],
+          'telegram.client_secret': settings['telegram.client_secret'],
           LinuxDOOAuthEnabled: settings.LinuxDOOAuthEnabled,
           LinuxDOClientId: settings.LinuxDOClientId,
           LinuxDOClientSecret: settings.LinuxDOClientSecret,
@@ -87,6 +89,7 @@ const AUTH_SECTIONS = [
           'passkey.enabled': settings['passkey.enabled'],
           'passkey.rp_display_name': settings['passkey.rp_display_name'],
           'passkey.rp_id': settings['passkey.rp_id'],
+          'passkey.legacy_rp_ids': settings['passkey.legacy_rp_ids'],
           'passkey.origins': settings['passkey.origins'],
           'passkey.allow_insecure_origin':
             settings['passkey.allow_insecure_origin'],
@@ -119,6 +122,11 @@ const AUTH_SECTIONS = [
     build: (settings: AuthSettings) => (
       <CustomOAuthSection serverAddress={settings.ServerAddress} />
     ),
+  },
+  {
+    id: 'zibll-agent',
+    titleKey: 'Zibll Agent Login',
+    build: (_settings: AuthSettings) => <ZibllAgentSection />,
   },
 ] as const
 

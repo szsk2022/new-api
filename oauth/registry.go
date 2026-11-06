@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"fmt"
+	"maps"
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
@@ -12,7 +13,8 @@ var (
 	providers = make(map[string]Provider)
 	mu        sync.RWMutex
 	// customProviderSlugs tracks which providers are custom (can be unregistered)
-	customProviderSlugs = make(map[string]bool)
+	customProviderSlugs     = make(map[string]bool)
+	customProviderConflicts = make(map[string]bool)
 )
 
 // Register registers an OAuth provider with the given name
@@ -23,11 +25,22 @@ func Register(name string, provider Provider) {
 }
 
 // RegisterCustom registers a custom OAuth provider (can be unregistered later)
-func RegisterCustom(name string, provider Provider) {
+func RegisterCustom(name string, provider Provider) error {
 	mu.Lock()
 	defer mu.Unlock()
+	if providers[name] != nil && !customProviderSlugs[name] {
+		customProviderConflicts[name] = true
+		return fmt.Errorf("custom OAuth provider %q conflicts with a built-in provider; rename the custom provider", name)
+	}
 	providers[name] = provider
 	customProviderSlugs[name] = true
+	return nil
+}
+
+func HasCustomProviderConflict(name string) bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	return customProviderConflicts[name]
 }
 
 // Unregister removes a provider from the registry
@@ -50,21 +63,26 @@ func GetAllProviders() map[string]Provider {
 	mu.RLock()
 	defer mu.RUnlock()
 	result := make(map[string]Provider, len(providers))
-	for k, v := range providers {
-		result[k] = v
-	}
+	maps.Copy(result, providers)
 	return result
 }
 
+// CustomProviderConfig exposes the configuration row of a custom provider
+// regardless of its concrete protocol implementation.
+type CustomProviderConfig interface {
+	Provider
+	GetConfig() *model.CustomOAuthProvider
+}
+
 // GetEnabledCustomProviders returns all enabled custom OAuth providers
-func GetEnabledCustomProviders() []*GenericOAuthProvider {
+func GetEnabledCustomProviders() []CustomProviderConfig {
 	mu.RLock()
 	defer mu.RUnlock()
-	var result []*GenericOAuthProvider
+	var result []CustomProviderConfig
 	for name, provider := range providers {
 		if customProviderSlugs[name] {
-			if gp, ok := provider.(*GenericOAuthProvider); ok && gp.IsEnabled() {
-				result = append(result, gp)
+			if cp, ok := provider.(CustomProviderConfig); ok && cp.IsEnabled() {
+				result = append(result, cp)
 			}
 		}
 	}
@@ -94,24 +112,35 @@ func LoadCustomProviders() error {
 		delete(providers, name)
 	}
 	customProviderSlugs = make(map[string]bool)
+	customProviderConflicts = make(map[string]bool)
 	mu.Unlock()
 
 	// Load all custom providers from database
 	customProviders, err := model.GetAllCustomOAuthProviders()
 	if err != nil {
-		common.SysError("Failed to load custom OAuth providers: " + err.Error())
+		common.SysError(common.LogText("Failed to load custom OAuth providers: %s", err.Error()))
 		return err
 	}
 
 	// Register each custom provider
+	var conflict error
 	for _, config := range customProviders {
-		provider := NewGenericOAuthProvider(config)
-		RegisterCustom(config.Slug, provider)
-		common.SysLog("Loaded custom OAuth provider: " + config.Name + " (" + config.Slug + ")")
+		var provider Provider
+		if config.IsZibllProvider() {
+			provider = NewZibllAgentProvider(config)
+		} else {
+			provider = NewGenericOAuthProvider(config)
+		}
+		if err := RegisterCustom(config.Slug, provider); err != nil {
+			common.SysError(err.Error())
+			conflict = err
+			continue
+		}
+		common.SysLog(common.LogText("Loaded custom OAuth provider: %s (%s)", config.Name, config.Slug))
 	}
 
-	common.SysLog(fmt.Sprintf("Loaded %d custom OAuth providers", len(customProviders)))
-	return nil
+	common.SysLog(common.LogText("Loaded %d custom OAuth providers", len(customProviders)))
+	return conflict
 }
 
 // ReloadCustomProviders reloads all custom OAuth providers from the database
@@ -121,14 +150,24 @@ func ReloadCustomProviders() error {
 
 // RegisterOrUpdateCustomProvider registers or updates a single custom provider
 func RegisterOrUpdateCustomProvider(config *model.CustomOAuthProvider) {
-	provider := NewGenericOAuthProvider(config)
-	mu.Lock()
-	defer mu.Unlock()
-	providers[config.Slug] = provider
-	customProviderSlugs[config.Slug] = true
+	var provider Provider
+	if config.IsZibllProvider() {
+		provider = NewZibllAgentProvider(config)
+	} else {
+		provider = NewGenericOAuthProvider(config)
+	}
+	if err := RegisterCustom(config.Slug, provider); err != nil {
+		common.SysError(err.Error())
+	}
 }
 
 // UnregisterCustomProvider unregisters a custom provider by slug
 func UnregisterCustomProvider(slug string) {
-	Unregister(slug)
+	mu.Lock()
+	defer mu.Unlock()
+	if customProviderSlugs[slug] {
+		delete(providers, slug)
+		delete(customProviderSlugs, slug)
+	}
+	delete(customProviderConflicts, slug)
 }

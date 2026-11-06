@@ -18,9 +18,8 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Link } from '@tanstack/react-router'
-import axios from 'axios'
 import { Loader2, LogIn, KeyRound } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -40,24 +39,31 @@ import {
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { login, wechatLoginByCode } from '@/features/auth/api'
+import { login, wechatLoginByCode, googleOneTapLogin } from '@/features/auth/api'
 import { LegalConsent } from '@/features/auth/components/legal-consent'
 import { OAuthProviders } from '@/features/auth/components/oauth-providers'
+import {
+  ZibllGzhDialog,
+} from '@/features/auth/components/zibll-gzh-dialog'
+import { zibllGZHSlug } from '@/features/auth/components/zibll-brand-icon'
+import { useOAuthLogin } from '@/features/auth/hooks/use-oauth-login'
 import { loginFormSchema } from '@/features/auth/constants'
 import { useAuthRedirect } from '@/features/auth/hooks/use-auth-redirect'
 import { useTurnstile } from '@/features/auth/hooks/use-turnstile'
 import { beginPasskeyLogin, finishPasskeyLogin } from '@/features/auth/passkey'
+import {
+  requestPasskeyAssertion,
+  rememberPasskeyRPID,
+  type PasskeyDomains,
+} from '@/features/auth/passkey/assertion'
+import { PasskeyDomainSelector } from '@/features/auth/passkey/components/passkey-domain-selector'
 import type { AuthFormProps } from '@/features/auth/types'
 import { useStatus } from '@/hooks/use-status'
-import { isAuthBundle } from '@/lib/api'
-import {
-  buildAssertionResult,
-  prepareCredentialRequestOptions,
-  isPasskeySupported as detectPasskeySupport,
-} from '@/lib/passkey'
-import { getServerErrorMessageKey } from '@/lib/server-error-message'
+import { handleServerError } from '@/lib/handle-server-error'
+import { isPasskeySupported as detectPasskeySupport } from '@/lib/passkey'
+import { AuthOperationError } from '@/lib/secure-verification'
+import { createServerError } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
-import { useAuthStore } from '@/stores/auth-store'
 
 export function UserAuthForm({
   className,
@@ -70,8 +76,19 @@ export function UserAuthForm({
   const [agreedToLegal, setAgreedToLegal] = useState(false)
   const [passkeySupported, setPasskeySupported] = useState(false)
   const [isPasskeyLoading, setIsPasskeyLoading] = useState(false)
+  const [passkeyDomains, setPasskeyDomains] = useState<PasskeyDomains | null>(
+    null
+  )
+  const [passkeyRPID, setPasskeyRPID] = useState<string>()
+  const passkeyOperation = useRef<AbortController | null>(null)
+  useEffect(() => () => passkeyOperation.current?.abort(), [])
   const [isWeChatDialogOpen, setIsWeChatDialogOpen] = useState(false)
   const [isWeChatSubmitting, setIsWeChatSubmitting] = useState(false)
+  const [zibllGzhOpen, setZibllGzhOpen] = useState(false)
+  const [zibllGzhState, setZibllGzhState] = useState('')
+  const googleButtonRef = useRef<HTMLDivElement | null>(null)
+  const [hasGoogleOneTap, setHasGoogleOneTap] = useState(false)
+  const [turnstileWidgetKey, setTurnstileWidgetKey] = useState(0)
   const legalConsentErrorMessage = t('Please agree to the legal terms first')
   const loginFailedMessage = t('Login failed')
 
@@ -83,6 +100,10 @@ export function UserAuthForm({
     (status?.password_login_enabled ??
       status?.data?.password_login_enabled ??
       true) !== false
+  const passwordLoginEncryptionEnabled =
+    (status?.password_login_encryption_enabled ??
+      status?.data?.password_login_encryption_enabled ??
+      false) === true
   const {
     isTurnstileEnabled,
     turnstileSiteKey,
@@ -90,10 +111,8 @@ export function UserAuthForm({
     setTurnstileToken,
     validateTurnstile,
   } = useTurnstile()
-  const { handleLoginSuccess, redirectTo2FA } = useAuthRedirect()
-  const setPending2FAFlowToken = useAuthStore(
-    (state) => state.auth.setPending2FAFlowToken
-  )
+  const { handleLoginResult } = useAuthRedirect()
+  const { handleZibllGzhLogin } = useOAuthLogin(status, redirectTo)
 
   const hasUserAgreement = Boolean(status?.user_agreement_enabled)
   const hasPrivacyPolicy = Boolean(status?.privacy_policy_enabled)
@@ -103,6 +122,9 @@ export function UserAuthForm({
     !passkeySupported ||
     (requiresLegalConsent && !agreedToLegal)
   const hasWeChatLogin = Boolean(status?.wechat_login)
+  const hasZibllGzh = Boolean(
+    status?.custom_oauth_providers?.some((p) => p.slug === zibllGZHSlug)
+  )
   const hasOAuthLogin = Boolean(
     status?.github_oauth ||
     status?.discord_oauth ||
@@ -158,33 +180,31 @@ export function UserAuthForm({
 
     if (!validateTurnstile()) return
 
+    const submittedTurnstileToken = turnstileToken
+    if (isTurnstileEnabled) {
+      setTurnstileToken('')
+      setTurnstileWidgetKey((current) => current + 1)
+    }
+
     setIsLoading(true)
     try {
       const res = await login({
         username: data.username,
         password: data.password,
-        turnstile: turnstileToken,
+        turnstile: submittedTurnstileToken,
+        passwordEncryptionEnabled: passwordLoginEncryptionEnabled,
       })
 
       if (res.success) {
-        if (res.data && 'require_2fa' in res.data && res.data.require_2fa) {
-          if (!res.data.flow_token) {
-            throw new Error(t('Login flow expired. Please sign in again.'))
-          }
-          setPending2FAFlowToken(res.data.flow_token)
-          redirectTo2FA()
-          return
+        form.setValue('password', '')
+        if (await handleLoginResult(res.data, redirectTo)) {
+          toast.success(t('Welcome back!'))
         }
-
-        if (!isAuthBundle(res.data)) {
-          throw new Error(t('Login failed'))
-        }
-        await handleLoginSuccess(res.data, redirectTo)
-        toast.success(t('Welcome back!'))
+      } else {
+        handleServerError(createServerError(res, loginFailedMessage))
       }
     } catch (error: unknown) {
-      if (axios.isAxiosError(error)) return
-      toast.error(error instanceof Error ? error.message : loginFailedMessage)
+      handleServerError(AuthOperationError.from(error, loginFailedMessage))
     } finally {
       setIsLoading(false)
     }
@@ -207,6 +227,102 @@ export function UserAuthForm({
     }
   }
 
+  // Zibll weixingzh (official account) login: fetch a flow state, then open
+  // the QR / verification-code dialog.
+  const handleZibllGzhDialogOpen = async () => {
+    if (requiresLegalConsent && !agreedToLegal) {
+      toast.error(legalConsentErrorMessage)
+      return
+    }
+    const provider = status?.custom_oauth_providers?.find(
+      (p) => p.slug === zibllGZHSlug
+    )
+    if (!provider) return
+    const state = await handleZibllGzhLogin(provider)
+    if (state) {
+      setZibllGzhState(state)
+      setZibllGzhOpen(true)
+    }
+  }
+
+  const handleGoogleCredential = async (response: { credential?: string }) => {
+    const credential = response?.credential
+    if (!credential) return
+    if (requiresLegalConsent && !agreedToLegal) {
+      toast.error(legalConsentErrorMessage)
+      return
+    }
+    setIsLoading(true)
+    try {
+      const res = await googleOneTapLogin(credential)
+      if (res.success) {
+        if (await handleLoginResult(res.data, redirectTo)) {
+          toast.success(t('Welcome back!'))
+        }
+      } else {
+        handleServerError(createServerError(res, loginFailedMessage))
+      }
+    } catch (error: unknown) {
+      handleServerError(AuthOperationError.from(error, loginFailedMessage))
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  // Google One Tap: load the GSI script and render the sign-in button +
+  // One Tap prompt once a client id is configured.
+  const googleOneTapClientId = (status?.google_onetap_client_id as string) ?? ''
+  useEffect(() => {
+    if (!googleOneTapClientId) return
+    setHasGoogleOneTap(true)
+    type GoogleAccounts = {
+      accounts: {
+        id: {
+          initialize: (config: Record<string, unknown>) => void
+          renderButton: (parent: HTMLElement, options: Record<string, unknown>) => void
+          prompt: () => void
+        }
+      }
+    }
+    const bootstrap = () => {
+      const google = (window as unknown as { google?: GoogleAccounts }).google
+      if (!google || !googleButtonRef.current) return
+      try {
+        google.accounts.id.initialize({
+          client_id: googleOneTapClientId,
+          callback: (response: { credential?: string }) =>
+            void handleGoogleCredential(response),
+          auto_select: false,
+          use_fedcm_for_prompt: true,
+        })
+        google.accounts.id.renderButton(googleButtonRef.current, {
+          theme: 'outline',
+          size: 'large',
+          shape: 'pill',
+          text: 'signin_with',
+          width: 320,
+        })
+        google.accounts.id.prompt()
+      } catch {
+        // GSI is best-effort; the button simply stays empty on failure.
+      }
+    }
+    const scriptId = 'google-gsi-client'
+    const existing = document.getElementById(scriptId)
+    if (existing) {
+      bootstrap()
+      return
+    }
+    const script = document.createElement('script')
+    script.src = 'https://accounts.google.com/gsi/client'
+    script.async = true
+    script.defer = true
+    script.id = scriptId
+    script.onload = () => bootstrap()
+    document.head.appendChild(script)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [googleOneTapClientId])
+
   async function handleWeChatLogin() {
     if (!wechatCode.trim()) {
       toast.error(t('Please enter the verification code'))
@@ -216,17 +332,18 @@ export function UserAuthForm({
     setIsWeChatSubmitting(true)
     try {
       const res = await wechatLoginByCode(wechatCode)
-      if (res?.success && isAuthBundle(res.data)) {
-        await handleLoginSuccess(res.data, redirectTo)
-        toast.success(t('Signed in via WeChat'))
+      if (res?.success) {
         handleWeChatDialogChange(false)
+        if (await handleLoginResult(res.data, redirectTo)) {
+          toast.success(t('Signed in via WeChat'))
+        }
       } else {
-        if (getServerErrorMessageKey(res)) return
-        toast.error(res?.message || loginFailedMessage)
+        handleServerError(createServerError(res, loginFailedMessage))
       }
     } catch (error: unknown) {
-      if (getServerErrorMessageKey(error)) return
-      toast.error(loginFailedMessage)
+      handleServerError(
+        new AuthOperationError(loginFailedMessage, undefined, { cause: error })
+      )
     } finally {
       setIsWeChatSubmitting(false)
     }
@@ -248,58 +365,45 @@ export function UserAuthForm({
       return
     }
 
+    if (passkeyOperation.current) return
+    const controller = new AbortController()
+    passkeyOperation.current = controller
     setIsPasskeyLoading(true)
     try {
-      const begin = await beginPasskeyLogin()
-      if (!begin.success) {
-        if (getServerErrorMessageKey(begin)) return
-        throw new Error(begin.message || t('Failed to start Passkey login'))
-      }
-
-      const publicKey = prepareCredentialRequestOptions(
-        begin.data?.options ?? begin.data
+      const passkey = await requestPasskeyAssertion(
+        (rpID) => beginPasskeyLogin(rpID, controller.signal),
+        controller.signal,
+        { rpID: passkeyRPID, onDomains: setPasskeyDomains }
       )
-      const flowToken = begin.data?.flow_token
-      if (!flowToken) {
-        throw new Error(t('Login flow expired. Please sign in again.'))
-      }
-
-      const credential = (await navigator.credentials.get({
-        publicKey,
-      })) as PublicKeyCredential | null
-
-      if (!credential) {
-        toast.info(t('Passkey login was cancelled'))
-        return
-      }
-
-      const assertion = buildAssertionResult(credential)
-      if (!assertion) {
-        throw new Error(t('Invalid Passkey response'))
-      }
-
-      const finish = await finishPasskeyLogin(flowToken, assertion)
+      const finish = await finishPasskeyLogin(
+        passkey.flowToken,
+        passkey.assertion,
+        controller.signal
+      )
+      controller.signal.throwIfAborted()
       if (!finish.success) {
-        if (getServerErrorMessageKey(finish)) return
-        throw new Error(finish.message || t('Failed to complete Passkey login'))
+        throw createServerError(finish, t('Failed to complete Passkey login'))
       }
 
-      if (!isAuthBundle(finish.data)) {
-        throw new Error(t('Missing user data from Passkey login response'))
+      rememberPasskeyRPID(passkey.rpID)
+      if (await handleLoginResult(finish.data, redirectTo)) {
+        toast.success(t('Signed in with Passkey'))
       }
-
-      await handleLoginSuccess(finish.data, redirectTo)
-      toast.success(t('Signed in with Passkey'))
     } catch (error: unknown) {
-      if (getServerErrorMessageKey(error)) return
+      if (controller.signal.aborted) return
       if (error instanceof DOMException && error.name === 'NotAllowedError') {
         toast.info(t('Passkey login was cancelled or timed out'))
       } else if (error instanceof Error) {
-        toast.error(error.message)
+        handleServerError(AuthOperationError.from(error))
       } else {
-        toast.error(t('Passkey login failed'))
+        handleServerError(
+          AuthOperationError.from(error, t('Passkey login failed'))
+        )
       }
     } finally {
+      if (passkeyOperation.current === controller) {
+        passkeyOperation.current = null
+      }
       setIsPasskeyLoading(false)
     }
   }
@@ -322,6 +426,12 @@ export function UserAuthForm({
             )}
             {t('Sign in with Passkey')}
           </Button>
+          <PasskeyDomainSelector
+            domains={passkeyDomains}
+            value={passkeyRPID}
+            onChange={setPasskeyRPID}
+            disabled={passkeyButtonDisabled}
+          />
           {!passkeySupported && (
             <p className='text-muted-foreground text-xs'>
               {t('Passkey is not supported on this device.')}
@@ -336,8 +446,12 @@ export function UserAuthForm({
         redirectTo={redirectTo}
         disabled={isLoading || (requiresLegalConsent && !agreedToLegal)}
         onWeChatLogin={hasWeChatLogin ? handleOpenWeChatDialog : undefined}
+        onZibllGzhLogin={handleZibllGzhDialogOpen}
         isWeChatLoading={isWeChatSubmitting}
       />
+      {hasGoogleOneTap && (
+        <div ref={googleButtonRef} className='flex w-full justify-center' />
+      )}
     </>
   )
 
@@ -398,7 +512,7 @@ export function UserAuthForm({
             <Button
               type='submit'
               className='mt-2 w-full justify-center gap-2'
-              disabled={isLoading || (requiresLegalConsent && !agreedToLegal)}
+              disabled={isLoading}
             >
               {isLoading ? <Loader2 className='animate-spin' /> : <LogIn />}
               {t('Sign in')}
@@ -408,8 +522,10 @@ export function UserAuthForm({
             {isTurnstileEnabled && (
               <div className='mt-2'>
                 <Turnstile
+                  key={turnstileWidgetKey}
                   siteKey={turnstileSiteKey}
                   onVerify={setTurnstileToken}
+                  onExpire={() => setTurnstileToken('')}
                 />
               </div>
             )}
@@ -490,6 +606,14 @@ export function UserAuthForm({
             />
           </div>
         </Dialog>
+      )}
+
+      {hasZibllGzh && (
+        <ZibllGzhDialog
+          open={zibllGzhOpen}
+          onOpenChange={setZibllGzhOpen}
+          state={zibllGzhState}
+        />
       )}
     </Form>
   )

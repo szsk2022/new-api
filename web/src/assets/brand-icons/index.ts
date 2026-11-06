@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+export { IconAlipay } from './icon-alipay'
 export { IconDiscord } from './icon-discord'
 export { IconDocker } from './icon-docker'
 export { IconFacebook } from './icon-facebook'
@@ -34,3 +35,12 @@ export { IconTrello } from './icon-trello'
 export { IconWeChat } from './icon-wechat'
 export { IconWhatsapp } from './icon-whatsapp'
 export { IconZoom } from './icon-zoom'
+export { IconZibllApple } from './icon-zibll-brands'
+export { IconZibllBaidu } from './icon-zibll-brands'
+export { IconZibllDouyin } from './icon-zibll-brands'
+export { IconZibllGitee } from './icon-zibll-brands'
+export { IconZibllGoogle } from './icon-zibll-brands'
+export { IconZibllMicrosoft } from './icon-zibll-brands'
+export { IconZibllQQ } from './icon-zibll-brands'
+export { IconZibllTwitter } from './icon-zibll-brands'
+export { IconZibllWeibo } from './icon-zibll-brands'
